@@ -65,7 +65,7 @@ class VAE_ResidualBlock(nn.Module):
 
         x = F.silu(x)
 
-        X = self.conv_2(x)
+        x = self.conv_2(x)
 
         return x + self.residual_layer(residue)
     

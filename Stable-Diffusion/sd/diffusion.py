@@ -158,7 +158,7 @@ class UNET_OutputLayer(nn.Module):
 class UNET(nn.Module):
     def __init__(self):
         super().__init__()
-        self.encoders = nn.Module([
+        self.encoders = nn.ModuleList([
             # (bs, 4, h/8, w/8)
             SwitchSequential(nn.Conv2d(4, 320, kernel_size=3, padding=1)),
 
@@ -204,37 +204,48 @@ class UNET(nn.Module):
 
             SwitchSequential(UNET_ResidualBlock(2560, 1280)),
 
+            # (Batch_Size, 2560, Height / 64, Width / 64) -> (Batch_Size, 1280, Height / 64, Width / 64) -> (Batch_Size, 1280, Height / 32, Width / 32)
             SwitchSequential(UNET_ResidualBlock(2560, 1280), Upsample(1280)),
 
+            # (Batch_Size, 2560, Height / 32, Width / 32) -> (Batch_Size, 1280, Height / 32, Width / 32) -> (Batch_Size, 1280, Height / 32, Width / 32)
             SwitchSequential(UNET_ResidualBlock(2560, 1280), UNET_AttentionBlock(8, 160)),
 
+            # (Batch_Size, 2560, Height / 32, Width / 32) -> (Batch_Size, 1280, Height / 32, Width / 32) -> (Batch_Size, 1280, Height / 32, Width / 32)
             SwitchSequential(UNET_ResidualBlock(2560, 1280), UNET_AttentionBlock(8, 160)),
 
-            SwitchSequential(UNET_ResidualBlock(2560, 1280), UNET_AttentionBlock(8, 160), Upsample(1280)),
+            # (Batch_Size, 1920, Height / 32, Width / 32) -> (Batch_Size, 1280, Height / 32, Width / 32) -> (Batch_Size, 1280, Height / 32, Width / 32) -> (Batch_Size, 1280, Height / 16, Width / 16)
+            SwitchSequential(UNET_ResidualBlock(1920, 1280), UNET_AttentionBlock(8, 160), Upsample(1280)),
 
+            # (Batch_Size, 1920, Height / 16, Width / 16) -> (Batch_Size, 640, Height / 16, Width / 16) -> (Batch_Size, 640, Height / 16, Width / 16)
+            SwitchSequential(UNET_ResidualBlock(1920, 640), UNET_AttentionBlock(8, 80)),
+
+            # (Batch_Size, 1280, Height / 16, Width / 16) -> (Batch_Size, 640, Height / 16, Width / 16) -> (Batch_Size, 640, Height / 16, Width / 16)
             SwitchSequential(UNET_ResidualBlock(1280, 640), UNET_AttentionBlock(8, 80)),
 
-            SwitchSequential(UNET_ResidualBlock(1280, 640), UNET_AttentionBlock(8, 80)),
-
+            # (Batch_Size, 960, Height / 16, Width / 16) -> (Batch_Size, 640, Height / 16, Width / 16) -> (Batch_Size, 640, Height / 16, Width / 16) -> (Batch_Size, 640, Height / 8, Width / 8)
             SwitchSequential(UNET_ResidualBlock(960, 640), UNET_AttentionBlock(8, 80), Upsample(640)),
 
+            # (Batch_Size, 960, Height / 8, Width / 8) -> (Batch_Size, 320, Height / 8, Width / 8) -> (Batch_Size, 320, Height / 8, Width / 8)
             SwitchSequential(UNET_ResidualBlock(960, 320), UNET_AttentionBlock(8, 40)),
 
-            SwitchSequential(UNET_ResidualBlock(640, 640), UNET_AttentionBlock(8, 80)),
+            # (Batch_Size, 640, Height / 8, Width / 8) -> (Batch_Size, 320, Height / 8, Width / 8) -> (Batch_Size, 320, Height / 8, Width / 8)
+            SwitchSequential(UNET_ResidualBlock(640, 320), UNET_AttentionBlock(8, 40)),
 
+            # (Batch_Size, 640, Height / 8, Width / 8) -> (Batch_Size, 320, Height / 8, Width / 8) -> (Batch_Size, 320, Height / 8, Width / 8)
             SwitchSequential(UNET_ResidualBlock(640, 320), UNET_AttentionBlock(8, 40)),
         ])
 
 
 class Diffusion(nn.Module):
     def __init__(self):
+        super().__init__()
         self.time_embedding = TimeEmbedding(320)
         self.unet = UNET()
         self.final = UNET_OutputLayer(320, 4)
 
     def forward(self, latent: torch.Tensor, context: torch.Tensor, time: torch.Tensor):
         # latent: (bs, 4, h/8, w/8)
-        # context: (bs, seq_len, dim)
+        # context: (bs, seq_len, dim) this is of clip encoder
         # time: (1, 320)
 
         # (1, 320) -> (1, 1280)

@@ -88,3 +88,4 @@ class CrossAttention(nn.Module):
         out = out.view(input_shape)
         out = self.out_proj(out)
         return out
+

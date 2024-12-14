@@ -37,7 +37,7 @@ class VAE_Encoder(nn.Sequential):
             # (bs, 512, height / 4, width / 4) --> (bs, 512, height / 8, width / 8)
             nn.Conv2d(512, 512, kernel_size=3, stride=2, padding=0),
 
-            # (bs, 512, height / 8, width / 8) --> (bs, 512, height / 4, width / 4)
+            # (bs, 512, height / 8, width / 8) --> (bs, 512, height / 8, width / 8)
             VAE_ResidualBlock(512, 512),
 
             # (bs, 512, height / 8, width / 8) --> (bs, 512, height / 8, width / 8)

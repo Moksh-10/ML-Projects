@@ -26,7 +26,7 @@ class CLIPLayer(nn.Module):
         self.attention = SelfAttentionBlock(n_head, n_embed)
         self.layernorm_2 = nn.LayerNorm(n_embed)
         self.linear_1 = nn.Linear(n_embed, 4*n_embed)
-        self.linear_1 = nn.Linear(4*n_embed, n_embed)
+        self.linear_2 = nn.Linear(4*n_embed, n_embed)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # (bs, seq_len, dim)

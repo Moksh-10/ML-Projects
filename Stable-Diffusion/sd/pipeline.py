@@ -12,9 +12,9 @@ LATENTS_HEIGHT = 512 // 8
 def generate(prompt: str,
              uncond_prompt: str, # neg prompt or empty str
              input_image=None,
-             strength=0.8,
+             strength=0.8, # attn to give to initial img
              do_cfg=True,
-             cfg_scale=7.5,
+             cfg_scale=7.5, # attn paid to prompt
              sampler_name="ddpm",
              n_inference_steps=50,
              models={}, seed=None,
@@ -40,6 +40,10 @@ def generate(prompt: str,
         clip = models["clip"]
         clip.to(device)
 
+        # cfg
+        # w = cfg_scale
+        # output = w * (output_conditioned - output_unconditioned) + output_unconditioned
+
         if do_cfg:
             # convert prompt to tokens with tokenizer
             cond_tokens = tokenizer.batch_encode_plus([prompt], padding="max_length", max_length=77).input_ids
@@ -57,10 +61,11 @@ def generate(prompt: str,
             context = torch.cat([cond_context, uncond_context])
 
         else:
+            # if we don't want cfg, we only go through prompt
             # convert it into list of tokens
             tokens = tokenizer.batch_encode_plus([prompt], padding="max_length", max_length=77).input_ids
             tokens = torch.tensor(tokens, dtype=torch.long, device=device)
-            #(2, 77, 768)
+            #(1, 77, 768)
             context = clip(tokens)
 
         to_idle(clip)
@@ -154,6 +159,7 @@ def rescale(x, old_range, new_range, clamp=False):
 
 
 def get_time_embedding(timestep):
+    # int to vector
     # (160, )
     freqs = torch.pow(10000, -torch.arange(start=0, end=160, dtype=torch.float32) / 160)
     # (1, 160)
