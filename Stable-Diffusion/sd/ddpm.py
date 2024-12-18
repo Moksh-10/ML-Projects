@@ -14,7 +14,7 @@ class DDPMSampler:
         self.generator = generator
         self.num_training_steps = num_training_steps
         # go from 1000 to 0
-        self.timesteps = torch.from_numpy(np.arange(0, num_training_steps[::-1].copy()))
+        self.timesteps = torch.from_numpy(np.arange(0, num_training_steps)[::-1].copy())
 
     def set_inference_timesteps(self, num_inference_steps=50):
         self.num_inference_steps = num_inference_steps
