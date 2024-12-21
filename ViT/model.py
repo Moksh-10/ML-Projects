@@ -1,157 +1,263 @@
-import math
 import torch
 import torch.nn as nn
-import torchvision.datasets
+import math
+import torchvision.datasets as datasets
 import torchvision.transforms as transforms
+from torch.utils.data import DataLoader
+from tqdm import tqdm
 
 
-def attn(q, k, v, mask):
-    d_k = q.shape[-1]
-
-    attn_scores = (q @ k.transpose(-1, -2)) / math.sqrt(d_k)
-    if mask is not None:
-        attn_scores = attn_scores.masked_fill_(mask == 0, 1e-9)
-    attn_scores = attn_scores.softmax(dim=-1)
-    return attn_scores @ v
-
-
-class GELU(nn.Module):
-    def forward(self, x):
-        return (0.5 * x) * (1 + torch.tanh((math.sqrt(2/math.pi))* (x + 0.044715 * (x**3))))
+class Model_Args:
+    emb_dim: int = 16
+    patch_size: int = 16
+    img_size: int = 224
+    n_channels: int = 3
+    # num_patches + 1 = seq_len (196 + 1 )
+    seq_len: int = 197
+    n_heads: int = 4
+    eps: float = 1e-6
+    dropout: float = 0.2
 
 
-class multi_head_attn(nn.Module):
-    def __init__(self, d_model: int, h: int):
+class attention(nn.Module):
+    def __init__(self, args: Model_Args):
         super().__init__()
-        self.d_model = d_model
-        self.h = h
+        self.args = args
 
-        self.d_k = d_model // h
-        assert d_model % h == 0, "d_model must be divisible by h"
+        self.emd_dim = args.emb_dim
+        self.seq_len = args.seq_len
+        self.n_heads = args.n_heads
+        self.head_dim = self.emd_dim // self.n_heads
 
-        self.wq = nn.Linear(d_model, d_model)
-        self.wk = nn.Linear(d_model, d_model)
-        self.wv = nn.Linear(d_model, d_model)
-        self.wo = nn.Linear(d_model, d_model)
+        self.wq = nn.Linear(self.emd_dim, self.emd_dim)
+        self.wk = nn.Linear(self.emd_dim, self.emd_dim)
+        self.wv = nn.Linear(self.emd_dim, self.emd_dim)
+        self.wo = nn.Linear(self.emd_dim, self.emd_dim)
 
-    def forward(self, q, k, v, mask):
-        # (batch, seq_len, dim) --> (batch, seq_len, d_model)
-        query = self.wq(q)
-        value = self.wv(v)
-        key = self.wk(k)
+    def forward(self, x: torch.Tensor):
+        bs, seq_len, dim = x.shape
 
-        # (batch, seq_len, d_model) --> (batch, seq_len, h, d_k) --> (batch, h, seq_len, d_k)
-        query = query.view(query.shape[0], query.shape[1], self.h, self.d_k).transpose(1, 2)
-        value = value.view(value.shape[0], value.shape[1], self.h, self.d_k).transpose(1, 2)
-        key = key.view(key.shape[0], key.shape[1], self.h, self.d_k).transpose(1, 2)
+        # (bs, seq_len, emb_dim) --> (bs, seq_len, emb_dim)
+        q = self.wq(x)
+        v = self.wv(x)
+        k = self.wk(x)
 
-        # (batch, h, seq_len, d_k)
-        x = attn(query, key, value, mask)
+        # (bs, seq_len, dim) --> (bs, seq_len, n_h, h_dim) --> (bs, n_h, seq_len, h_dim)
+        q = q.view(bs, seq_len, self.n_heads, self.head_dim).reshape(bs, self.n_heads, seq_len, self.head_dim)
+        k = k.view(bs, seq_len, self.n_heads, self.head_dim).reshape(bs, self.n_heads, seq_len, self.head_dim)
+        v = v.view(bs, seq_len, self.n_heads, self.head_dim).reshape(bs, self.n_heads, seq_len, self.head_dim)
 
-        # (batch, h, seq_len, d_k) --> (batch, seq_len, h, d_k) --> (batch, seq_len, d_model)
-        x = x.transpose(1, 2).contiguous().view(x.shape[0], -1, self.h * self.d_k)
+        # (bs, n_h, seq_len, h_dim) * (bs, n_h, h_dim, seq_len) --> (bs, n_h, seq_len, seq_len)
+        attn = (q @ k.transpose(2, 3) / math.sqrt(dim))
+        # (bs, n_h, seq_len, seq_len) --> (bs, n_h, seq_len, seq_len)
+        attn_sc = nn.functional.softmax(attn, dim=-1)
+        # (bs, n_h, seq_len, seq_len) * (bs, n_h, seq_len, h_dim) --> (bs, n_h, seq_len, h_dim)
+        attn_sc = attn_sc @ v
 
-        # (batch, seq_len, d_model) --> (batch, seq_len, d_model)
-        return self.wo(x)
+        # (bs, n_h, seq_len, h_dim) --> (bs, seq_len, n_h, h_dim) --> (bs, seq_len, n_h * h_dim)
+        attn_sc = attn_sc.transpose(1, 2).contiguous().view(bs, seq_len, -1)
+
+        # (bs, seq_len, n_h * h_dim) --> (bs, seq_len, emb_dim)
+        attn_sc = self.wo(attn_sc)
+
+        # (bs, seq_len, emb_dim)
+        return attn_sc
 
 
-class feed_for(nn.Module):
-    def __init__(self, d_model: int, d_ff: int):
+class feed_forward(nn.Module):
+    def __init__(self, args: Model_Args):
         super().__init__()
-        self.l1 = nn.Linear(d_model, d_ff)
-        self.l2 = nn.Linear(d_ff, d_model)
-        self.act = GELU()
+        self.l1 = nn.Linear(args.emb_dim, 4 * args.emb_dim)
+        self.l2 = nn.Linear(4 * args.emb_dim, args.emb_dim)
 
-    def forward(self, x):
-        # (batch, seq_len, d_model) --> (batch, seq_len, d_ff) --> (batch, seq_len, d_model)
-        return self.l2(self.act(self.l1(x)))
-
-
-class layer_norm(nn.Module):
-    def __init__(self, eps: float = 10**-6):
-        super().__init__()
-        self.eps = eps
-        self.alpha = nn.Parameter(torch.ones(1))
-        self.bias = nn.Parameter(torch.zeros(1))
-
-    def forward(self, x):
-        mean = x.mean(dim=-1, keepdim=True)
-        std = x.std(dim=-1, keepdim=True)
-        return self.alpha * (x - mean) / (std + self.eps) + self.bias
-
-
-class res_conn(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.layer_norm = layer_norm()
-
-    def forward(self, x, sublayer):
-        return x + sublayer(self.layer_norm(x))
-
-
-class encoder_block(nn.Module):
-    def __init__(self, feedfor: feed_for, self_attn: multi_head_attn) -> None:
-        super().__init__()
-        self.feed_for = feedfor
-        self.self_attn = self_attn
-        self.res_conn = nn.ModuleList([res_conn() for _ in range(2)])
-
-    def forward(self, x, mask):
-        x = self.res_conn[0](x, lambda x: self.self_attn(x, x, x, mask))
-        x = self.res_conn[1](x, self.feed_for)
+    def forward(self, x: torch.Tensor):
+        x = self.l1(x)
+        x = nn.functional.gelu(x)
+        x = self.l2(x)
         return x
 
 
-class enc(nn.Module):
-    def __init__(self, layers: nn.ModuleList):
+class encoder(nn.Module):
+    def __init__(self, args: Model_Args):
         super().__init__()
-        self.layers = layers
-        self.layer_norm = layer_norm()
+        self.args = args
+        self.attn = attention(self.args)
+        self.feed_for = feed_forward(self.args)
+        self.ln1 = nn.LayerNorm(self.args.emb_dim, eps=self.args.eps)
+        self.ln2 = nn.LayerNorm(self.args.emb_dim, eps=self.args.eps)
 
-    def forward(self, x, mask):
-        for layer in self.layers:
-            x = layer(x, mask)
-        return self.layer_norm(x)
+    def forward(self, x: torch.Tensor):
+        res = x
+        x = self.ln1(x)
+        x = self.attn(x)
+        x += res
+        res = x
+        x = self.ln2(x)
+        x = self.feed_for(x)
+        x += res
+        return x
+
+
+class n_encoders(nn.Module):
+    def __init__(self, args: Model_Args):
+        super().__init__()
+        self.args = args
+        self.layers = nn.ModuleList([encoder(self.args) for _ in range(6)])
+
+    def forward(self, x: torch.Tensor):
+        for l in self.layers:
+            x = l(x)
+        return x
 
 
 class patch_emb(nn.Module):
-    def __init__(self, emb_dim, patch_size, num_patches, in_channels):
+    def __init__(self, args: Model_Args):
         super().__init__()
-        self.patcher = nn.Sequential(
-            # (batch, c, h, w) --> (batch, emb_dim, h, w)
-            nn.Conv2d(in_channels, emb_dim, kernel_size=patch_size, stride=patch_size),
-            # (batch, emb_dim, h, w) --> (batch, emb_dim, h*w)
-            nn.Flatten(2)
-        )
-        self.cls_token = nn.Parameter(torch.randn(size=(1, 1, emb_dim)), requires_grad=True)
-        self.pos_emb = nn. Parameter(torch.randn(size=(1, num_patches+1, emb_dim)), requires_grad=True)
+        self.args = args
+        self.conv = nn.Conv2d(in_channels=self.args.n_channels,
+                              out_channels=self.args.emb_dim,
+                              kernel_size=self.args.patch_size,
+                              stride=self.args.patch_size)
+        self.flatten = nn.Flatten(2)
+        self.num_patches = (self.args.img_size // self.args.patch_size) ** 2
+        self.cls = nn.Parameter(torch.randn((1, 1, self.args.emb_dim)), requires_grad=True)
+        self.pos_embd = nn.Parameter(torch.randn((1, self.num_patches + 1, self.args.emb_dim)), requires_grad=True)
+        self.dropout = nn.Dropout(self.args.dropout)
 
-    def forward(self, x):
-        cls_token = self.cls_token.expand(x.shape[0], -1, -1)
-        x = self.patcher(x).permute(0, 2, 1)  # (b, h*w, emb_dim)
-        x = torch.cat([cls_token, x], dim=1)
-        x = self.pos_emb + x
+    def forward(self, x: torch.Tensor):
+        cls = self.cls.expand(x.shape[0], -1, -1)
+        # (bs, in_c, h, w) --> (bs, emb_dim, new_h, new_w)
+        x = self.conv(x)
+        # (bs, emb_dim, new_h, new_w) --> (bs, emb_dim, new_h * new_w) --> (bs, new_h * new_w, emb_dim)
+        x = self.flatten(x).permute(0, 2, 1)
+        # (bs, new_h * new_w, emb_dim) --> (bs, num_patches + 1, emb_dim)
+        x = torch.cat([x, cls], dim=1)
+        # (bs, num_patches + 1, emb_dim) --> (bs, num_patches + 1, emb_dim)
+        x += self.pos_embd
+        # (bs, num_patches + 1, emb_dim)
         return x
 
 
-class vit(nn.Module):
-    def __init__(self, emb_dim, patch_size, num_patches, in_channels, num_enc, num_classes, d_model, h, d_ff):
+class vit_model(nn.Module):
+    def __init__(self, args: Model_Args, classes: int):
         super().__init__()
-        self.emb_block = patch_emb(emb_dim, patch_size, num_patches, in_channels)
-        self.enc_blocks = nn.ModuleList()
-        for _ in range(num_enc):
-            enc_self_att = multi_head_attn(emb_dim, h)
-            enc_feed_for = feed_for(emb_dim, d_ff)
-            enc_block = encoder_block(enc_feed_for, enc_self_att)
-            self.enc_blocks.append(enc_block)
-        self.mlp = nn.Sequential(
-            nn.LayerNorm(emb_dim),
-            nn.Linear(emb_dim, num_classes)
-        )
+        self.args = args
+        self.classes = classes
+        self.encoders = n_encoders(args)
+        self.patch_embd = patch_emb(args)
+        self.mlp = nn.Linear(self.args.emb_dim, self.classes)
 
-    def forward(self, x):
-        x = self.emb_block(x)
-        for block in self.enc_blocks:
-            x = block(x, None)
+    def forward(self, x: torch.Tensor):
+        x = self.patch_embd(x)
+        x = self.encoders(x)
         x = self.mlp(x[:, 0, :])
         return x
+
+
+if __name__=='__main__':
+
+    y = Model_Args()
+    a = torch.randn(512, y.n_channels, y.img_size, y.img_size)
+    print(f'input: {a.shape}')
+    # xd = attention(y)
+    # xr = feed_forward(y)
+    # x = xd(a)
+    # xe = xr(x)
+    # xde = n_encoders(y)
+    # # xc = xd(a)
+    # xd = patch_emb(y)
+    # xc = xd(a)
+    # xc = xde(a)
+    xf = vit_model(y, 10)
+    xc = xf(a)
+    print(f'output: {xc.shape}')
+
+# parameters
+BATCH_SIZE = 64
+NUM_EPOCHS = 50
+LEARNING_RATE = 0.001
+
+device = 'cuda' if torch.cuda.is_available() else 'cpu'
+print(f'using device: {device}')
+
+train_transform = transforms.Compose([
+    transforms.Resize((224, 224)),
+    transforms.ToTensor(),
+    transforms.Normalize((0.5,), (0.5,))
+])
+
+test_transform = transforms.Compose([
+    transforms.Resize((224, 224)),
+    transforms.ToTensor()
+])
+
+train_data = datasets.CIFAR10(root='/data', train=True, transform=train_transform, download=True)
+test_data = datasets.CIFAR10(root='/data', train=False, transform=test_transform, download=True)
+classes = len(train_data.classes)
+print(f'number of classes: {classes}')
+print(f'size of train data: {len(train_data)}')
+
+train_dl = DataLoader(train_data, batch_size=BATCH_SIZE, shuffle=True, num_workers=4, pin_memory=True)
+test_dl = DataLoader(test_data, batch_size=BATCH_SIZE, shuffle=True)
+
+args = Model_Args
+m = vit_model(args, classes=classes).to(device)
+
+loss_fn = nn.CrossEntropyLoss()
+optimizer = torch.optim.Adam(m.parameters(), lr=LEARNING_RATE)
+
+train_r_loss, train_r_acc = [], []
+
+for e in range(NUM_EPOCHS):
+    m.train()
+    running_loss = 0
+    correct, total = 0, 0
+    for batch_idx, (img, label) in tqdm(enumerate(train_dl)):
+        img = img.to(device)
+        label = label.type(torch.uint8).to(device)
+        optimizer.zero_grad()
+        y = m(img)
+        y_pred = torch.argmax(y, dim=1)
+        loss = loss_fn(y, label)
+        running_loss += loss.item()
+        loss.backward()
+        optimizer.step()
+        correct += (y_pred == label).sum().item()
+        total += label.size(0)
+
+    train_loss = running_loss / (batch_idx + 1)
+    train_r_loss.append(train_loss)
+    train_acc = correct / total
+    train_r_acc.append(train_acc)
+
+    print(f"for epoch: {e+ 1}: ")
+    print(f"train_loss: {train_loss}")
+    print(f"train_acc: {train_acc}")
+
+
+for e in range(1):
+    m.eval()
+    r_loss = 0
+    test_loss, test_acc = 0, 0
+    correct, total = 0, 0
+    with torch.no_grad():
+        for batch_idx, (img, label) in tqdm(enumerate(test_dl)):
+            img = img.to(device)
+            label = label.type(torch.uint8).to(device)
+            y = m(img)
+            y_pred = torch.argmax(y, dim=1)
+            loss = loss_fn(y, label)
+            r_loss += loss.item()
+            correct += (y_pred == label).sum().item()
+            total += label.size(0)
+
+    test_loss = r_loss / (batch_idx + 1)
+    test_acc = correct / total
+
+    print(f"for epoch: {e + 1}: ")
+    print(f"test_loss: {test_loss}")
+    print(f"test_acc: {test_acc}")
+
+
+
+
