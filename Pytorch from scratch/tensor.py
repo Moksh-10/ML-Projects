@@ -1,10 +1,10 @@
-from typing import Union, List, Callable, Optional
+from typing import Union, List, Callable, Optional, Tuple
 from dataclasses import dataclass
 import numpy as np
 
 Scalar = Union[int, float]
 
-Data = Union[Scalar, list, np.ndarray]
+Data = Union[Scalar, list, np.ndarray, "Tensor"]
 
 @dataclass(frozen=True)
 class Leaf:
@@ -26,7 +26,7 @@ class Tensor:
 
     @data.setter
     def data(self, data: Data):
-        self._data = Tensor.build_ndarray(data)
+        self._data = Tensor.build_ndarray(data, self.dtype)
         if self.requires_grad:
             self.zero_grad()
 
@@ -35,7 +35,7 @@ class Tensor:
         return self.data.size
 
     @property
-    def shape(self) -> int:
+    def shape(self) -> Tuple[int, ...]:
         return self.data.shape
 
     @property
@@ -58,9 +58,49 @@ class Tensor:
             self.grad = np.zeros_like(self._data)
         else:
             self.grad.fill(0.0)
-#
-# t = Tensor([1, 2, 3], requires_grad=True)
-# t.data = [5, 5, 5]
-# print(t, t.grad, t.ndim, t.shape)
 
+    def backward(self, grad: Optional[np.ndarray]=None) -> None:
+        if not self.requires_grad:
+            raise RuntimeError(
+                "can't call backward() as requires_grad is False"
+            )
+
+        if grad is None:
+            if grad.shape == ():
+                grad = np.array(1.0)
+            else:
+                raise ValueError("grad must be provided if tensor has some shape")
+
+        self.grad = self.grad + grad
+
+        for dep in self.dependencies:
+            back_grad = dep.grad_fn(grad)
+            dep.value.backward(back_grad)
+
+    def transpose(self, axes: Tuple[int, ...]=None) -> "Tensor":
+        out = np.transpose(self.data, axes=axes)
+        dependencies: List[Leaf] = []
+
+        def _back(grad: np.ndarray) -> np.ndarray:
+            return np.transpose(grad, axes=axes)
+
+        if self.requires_grad:
+            dependencies.append(
+                Leaf(value=self, grad_fn=_back)
+            )
+
+        return Tensor(
+            out,
+            requires_grad=self.requires_grad,
+            dependencies=dependencies
+        )
+
+    @property
+    def T(self):
+        return self.transpose()
+
+t = Tensor([[1, 2, 3], [4, 5, 6]], requires_grad=True)
+tt = t.T
+tt.backward(np.ones_like(tt.data))
+print(t.grad, tt.grad)
 
