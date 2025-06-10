@@ -73,6 +73,21 @@ class GemmaConfig():
         self.pad_token_id = pad_token_id
 
 
+class rms_norm(nn.Module):
+    def __init__(self, dim: int, eps: float=1e-6):
+        super().__init__()
+        self.eps = eps
+        self.wei = nn.Parameter(torch.zeros(dim))
+
+    def _norm(self, x):
+        return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
+
+    def forward(self, x):
+        out = self._norm(x.float())
+        out = out * (1.0 + self.wei.float())
+        return out.type_as(x)
+
+
 class PaliGemmaForConditionalGeneration(nn.Module):
     def __init__(self, config: PaliGemmaConfig):
         super().__init__()
