@@ -59,6 +59,38 @@ class up(nn.Module):
 
 class unet(nn.Module):
     def __init__(self, in_ch, num_cl):
+        super().__init__()
+        self.dc1 = down(in_ch, 64)
+        self.dc2 = down(64, 128)
+        self.dc3 = down(128, 256)
+        self.dc4 = down(256, 512)
+
+        self.bn = double_conv(512, 1024)
+
+        self.uc1 = up(1024, 512)
+        self.uc2 = up(512, 256)
+        self.uc3 = up(256, 128)
+        self.uc4 = up(128, 64)
+
+        self.out = nn.Conv2d(64, num_cl, kernel_size=1)
+
+    def forward(self, x):
+        d1, p1 = self.dc1(x)
+        d2, p2 = self.dc2(p1)
+        d3, p3 = self.dc3(p2)
+        d4, p4 = self.dc4(p3)
+
+        b = self.bn(p4)
+
+        u1 = self.uc1(b, d4)
+        u2 = self.uc2(u1, d3)
+        u3 = self.uc3(u2, d2)
+        u4 = self.uc4(u3, d1)
+
+        out = self.out(u4)
+        return out
+
+
 
 
 
