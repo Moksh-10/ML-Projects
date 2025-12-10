@@ -92,5 +92,28 @@ class gqattn(nn.Module):
 
         if qk_norm:
             self.q_norm = rms_norm(head_dim, eps=1e-6)
+            self.k_norm = rms_norm(head_dim, eps=1e-6)
+        else:
+            self.q_norm = self.k_norm = None
 
+    def forward(self, x, mask, cos, sin):
+        b, sl, dd = x.shape
+
+        q = self.wq(x)
+        k = self.wk(x)
+        v = self.wv(x)
+
+        q = q.view(b, sl, self.nh, self.hd).transpose(1, 2)
+        k = k.view(b, sl, self.nkv, self.hd).transpose(1, 2)
+        q = q.view(b, sl, self.nkv, self.hd).transpose(1, 2)
+
+        if self.q_norm:
+            q = self.q_norm(q)
+        if self.k_norm:
+            k = self.k_norm(k)
+
+        q = rope(q, cos, sin)
+        k = rope(k, cos, sin)
+
+        k = k
 
