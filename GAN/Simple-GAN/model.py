@@ -130,6 +130,9 @@ def train_gan(gen, disc, gen_optim, disc_optim, tl, epochs=200, device="cpu", pl
         if e % plot_loss_freq == 0:
             print(f"epoch: {e}/{epochs} | gen loss: {gen_epoch_losses} | disc_loss: {disc_epoch_losses}")
 
+        gen_losses.append(gen_epoch_losses)
+        disc_losses.append(disc_epoch_losses)
+
         if e % plot_gen_freq == 0:
             gen.eval()
             with torch.no_grad():
