@@ -4,7 +4,7 @@ import torch.nn.functional as F
 from dataclasses import dataclass
 
 @dataclass
-class Llama4TextConfig:
+class text_config:
     vocab_size: int = 202048
     hidden_size: int = 5120
     intermediate_size: int = 8192
@@ -30,7 +30,7 @@ class Llama4TextConfig:
     attn_scale: float = 0.1
 
 @dataclass
-class Llama4VisionConfig:
+class vision_config:
     hidden_size: int = 768
     num_hidden_layers: int = 34
     num_attention_heads: int = 16
@@ -46,3 +46,50 @@ class Llama4VisionConfig:
     projector_dropout: float = 0.0
     attention_dropout: float = 0.0
     rope_theta: int = 10000
+
+
+class text_experts(nn.Module):
+    def __init__(self, config: text_config) -> None:
+        super().__init__()
+        self.num_experts = config.num_local_experts
+        self.inter_size = config.intermediate_size
+        self.hidden_size = config.hidden_size
+        self.expert_dim = config.intermediate_size
+        self.gate_up_proj = nn.Parameter(torch.empty(self.num_experts, self.hidden_size, 2*self.expert_dim))
+        self.down_proj = nn.Parameter(torch.empty(self.num_experts, self.expert_dim, self.hidden_size))
+
+        nn.init.normal_(self.gate_up_proj)
+        nn.init.normal_(self.down_proj)
+
+    def forward(self, x):
+        pass 
+
+
+class text_moe(nn.Module):
+    def __init__(self, config: text_config) -> None:
+        super().__init__()
+        self.top_k = config.num_experts_per_tok
+        self.hidden_dim = config.hidden_size
+        self.num_exp = config.num_local_experts
+        self.experts = text_experts(config)
+        self.router = nn.Linear(config.hidden_size, config.num_local_experts, bias=False)
+    
+    def forward(self, x):
+        bs, sl, dim = x.shape
+        x = x.view(-1, dim)
+        router_logits = self.router(x) # (-1, dim) --> (-1, num_local_experts) basically each token is mapped to a router
+
+        tokens_per_exp = bs * sl 
+
+        
+
+if __name__ == "__main__":
+    config = text_config(
+            hidden_size=768,
+            intermediate_size=768*2, 
+            intermediate_size_mlp=768*2
+            )
+    x = torch.randn(2, 8, 768)
+    tmoe = text_moe(config)
+    tmoe(x) 
+
