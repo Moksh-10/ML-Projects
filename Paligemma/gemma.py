@@ -1,5 +1,5 @@
-from typing import List, Tuple
-
+import math
+from typing import List, Tuple, Optional
 import torch
 from torch import nn
 
@@ -182,3 +182,141 @@ def apply_rope(q, k, cos, sin, unsqueeze_dim=1):
     q_emb = (q * cos) + (rotate_half(q) * sin)
     k_emb = (k * cos) + (rotate_half(k) * sin)
     return q_emb, k_emb
+
+
+class gemma_attn(nn.Module):
+    def __init__(self, config: GemmaConfig, layer_idx: Optional[int] = None):
+        super().__init__()
+        self.config = config
+        self.layer_idx = layer_idx
+        self.attn_dr = config.attention_dropout
+        self.hid_size = config.hidden_size
+        self.nh = config.num_attention_heads
+        self.hd = config.head_dim
+        self.n_kv_h = config.num_key_value_heads
+        self.n_kv_r = self.nh // self.n_kv_h
+        self.max_pe = config.max_position_embeddings
+        self.rope_theta = config.rope_theta
+        self.is_casual = True
+
+        assert self.hid_size % self.nh == 0
+
+        self.q_poj = nn.Linear(self.hid_size, self.nh * self.hd, bias=config.attention_bias)
+        self.k_proj = nn.Linear(self.hid_size, self.n_kv_h * self.hd, bias=config.attention_bias)
+        self.v_proj = nn.Linear(self.hid_size, self.n_kv_h * self.hd, bias=config.attention_bias)
+        self.o_proj = nn.Linear(self.nh * self.hd, self.hid_size, bias=config.attention_bias)
+        self.rotary_emb = rope(self.hd, self.max_pe, self.rope_theta)
+
+    def forward(self, x: torch.Tensor, attn_mask:Optional[torch.Tensor]=None, pos_ids:Optional[torch.LongTensor]=None, kv_cache: Optional[kv_cache]=None):
+        bs, sl, dim = x.size()
+        q = self.q_poj(x)
+        k = self.k_proj(x)
+        v = self.v_proj(x)
+        q = q.view(bs, sl, self.nh, self.hd).transpose(1, 2)
+        k = k.view(bs, sl, self.n_kv_h, self.hd).transpose(1, 2)
+        v = v.view(bs, sl, self.n_kv_h, self.hd).transpose(1, 2)
+
+        cos, sin = self.rotary_emb(v, pos_ids, sl=None)
+        q, k = apply_rope(q, k, cos, sin)
+
+        if kv_cache is not None:
+            k, v = kv_cache.update(k, v, self.layer_idx)
+
+        k = repeat_kv(k, self.n_kv_r)
+        v = repeat_kv(v, self.n_kv_r)
+
+        attn = torch.matmul(q, k.transpose(2, 3)) / math.sqrt(self.hd)
+
+        assert attn_mask is not None
+        attn = attn + attn_mask
+
+        attn = nn.functional.softmax(attn, dim=-1, dtype=torch.float32).to(q.dtype)
+        attn = nn.functional.dropout(attn, p=self.attn_dr, training=self.training)
+        attn_out = torch.matmul(attn, v)
+
+        if attn_out.size() != (bs, self.nh, sl, self.hd):
+            raise ValueError(f"expected : {bs, self.nh, sl, self.hd}, and got : {attn_out.size()}")
+
+        attn_out = attn_out.transpose(1, 2).contiguous()
+        attn_out = attn_out.view(bs, sl, -1)
+        attn_out = self.o_proj(attn_out)
+
+        return attn_out, attn
+
+
+class gemma_dec(nn.Module):
+    def __init__(self, config: GemmaConfig, layer_idx: int):
+        super().__init__()
+        self.hid_size = config.hidden_size
+        self.att = gemma_attn(config, layer_idx)
+        self.mlp = mlp(config)
+        self.in_norm = rms_norm(config.hidden_size, eps=config.rms_norm_eps)
+        self.post_attn_ln = rms_norm(config.hidden_size, eps=config.rms_norm_eps)
+
+    def forward(self, x: torch.Tensor, attn_mask: Optional[torch.Tensor] = None, pos_ids: Optional[torch.LongTensor] = None, kv_cache: Optional[kv_cache]=None):
+        res = x
+        x = self.in_norm(x)
+        x, _, = self.att(x, attn_mask, pos_ids, kv_cache)
+        x = res + x
+        res = x
+        x = self.post_attn_ln(x)
+        x = self.mlp(x)
+        x = res + x
+        return x
+
+
+class gemma_model(nn.Module):
+    def __init__(self, config: GemmaConfig):
+        super().__init__()
+        self.config = config
+        self.pad_idx = config.pad_token_id
+        self.vs = config.vocab_size
+        self.emb_token = nn.Embedding(config.vocab_size, config.hidden_size, self.pad_idx)
+        self.ls = nn.ModuleList([gemma_dec(config, layer_idx) for layer_idx in range(config.num_hidden_layers)])
+        self.norm = rms_norm(config.hidden_size, eps=config.rms_norm_eps)
+
+    def get_input_embeds(self):
+        return self.emb_token
+
+    def forward(self, attn_mask: Optional[torch.Tensor]=None, pos_ids: Optional[torch.LongTensor]=None, input_embds: Optional[torch.FloatTensor]=None, kv_cache: Optional[kv_cache]=None):
+        x = input_embds
+        norms = torch.tensor(self.config.hidden_size**0.5, dtype=x.dtype)
+        x = x * norms
+        for l in self.ls:
+            x = l(x, a, po, kv_cache)
+        x = self.norm(x)
+        return x
+
+
+class gemma_casualLM(nn.Module):
+    def __init__(self, confif: GemmaConfig):
+        super().__init__()
+        self.config = confif
+        self.model = gemma_model(confif)
+        self.vs = confif.vocab_size
+        self.lm_head = nn.Linear(confif.hidden_size, confif.vocab_size, bias=False)
+
+    def get_input_embeds(self):
+        return self.model.emb_token
+
+    def tie_wei(self):
+        self.lm_head.weight = self.model.emb_token.weight
+
+    def forward(self, attn_mask: Optional[torch.Tensor]=None, pos_ids:Optional[torch.LongTensor]=None, input_embds:Optional[torch.FloatTensor]=None):
+        x = self.model(attn_mask, pos_ids, input_embds, kv_cache)
+        hs = x
+        logits = self.lm_head(hs)
+        logits = logits.float()
+        rd = {"logits": logits,}
+        if kv_cache is not None:
+            rd["kv_cache"] = kv_cache
+        return rd
+
+
+class pg_mm_proj(nn.Module):
+    def __init__(self, config: PaliGemmaConfig):
+        super().__init__()
+        self.l = nn.Linear(config.vision_config.hidden_size, config.projection_dim, bias=True)
+
+    def forwars(self, x):
+        return self.l(x)
